@@ -103,7 +103,7 @@ func main() {
 	// Command line parameters
 	var conc, reqs, cpus int
 	var ka, comp bool
-	var method, url, body, user, pass, cpuprof, memprof string
+	var method, url, body, user, pass, cpuprof/*, memprof*/ string
 	var hdr header
 
 	flag.IntVar(&conc, "concurrency", 100, "Number of concurrent connections")
