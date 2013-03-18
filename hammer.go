@@ -14,23 +14,28 @@ import "time"
 
 // header field type
 type hfield struct {
-	name string
+	name  string
 	value string
 }
+
 // header type: a slice of strings implementing the flag.Value interface.
 type header []hfield
+
 // String is the method to format the flag's value, part of the flag.Value interface.
 func (h *header) String() string {
 	return fmt.Sprint(*h)
 }
+
 type errorString string
+
 func (e errorString) Error() string {
 	return string(e)
 }
+
 // Set is the method to set the flag value, part of the flag.Value interface.
 func (h *header) Set(value string) error {
 	i := strings.IndexRune(value, ':')
-	if i < 0  {
+	if i < 0 {
 		return errorString("Header field format must be `name: value'")
 	}
 	hf := hfield{value[0:i], value[i+1:]}
@@ -38,16 +43,16 @@ func (h *header) Set(value string) error {
 	return nil
 }
 
-var ready_ch = make (chan bool);
-var start_ch = make (chan bool);
-var done_ch = make (chan bool);
+var ready_ch = make(chan bool)
+var start_ch = make(chan bool)
+var done_ch = make(chan bool)
 
 func send_requests(client *http.Client, iter int, method string, url string, body string, hdr header, user string, pass string) {
-	var buf io.ReadSeeker
+	var body_reader io.ReadSeeker
 	if 0 < len(body) {
-		buf = strings.NewReader(body)
+		body_reader = strings.NewReader(body)
 	}
-	req, err := http.NewRequest(method, url, buf)
+	req, err := http.NewRequest(method, url, body_reader)
 	if err != nil {
 		log.Println(err)
 		return
@@ -63,21 +68,31 @@ func send_requests(client *http.Client, iter int, method string, url string, bod
 	ready_ch <- true
 
 	// Wait for main thread to start the injection
-	<- start_ch
+	<-start_ch
 
+	var buf = make([]byte, 4096)
 	// Perform injection
 	for i := 0; i < iter; i++ {
-		if buf != nil {
-			_, err = buf.Seek(0,0)
-		}
-		if err != nil {
-			log.Println(err)
-			break
+		if body_reader != nil {
+			_, err = body_reader.Seek(0, 0)
+			if err != nil {
+				log.Println(err)
+				break
+			}
 		}
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Println(err)
 			break
+		}
+		for {
+			_, err = resp.Body.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					log.Println(err)
+				}
+				break
+			}
 		}
 		resp.Body.Close()
 	}
@@ -88,40 +103,41 @@ func main() {
 	// Command line parameters
 	var conc, reqs, cpus int
 	var ka, comp bool
-	var method, url, body, user, pass, profile string
+	var method, url, body, user, pass, cpuprof, memprof string
 	var hdr header
 
-        flag.IntVar(&conc, "concurrency", 100, "Number of concurrent connections")
-        flag.IntVar(&reqs, "requests", 100, "Total number of requests")
-        flag.IntVar(&cpus, "cpus", 2, "Number of CPUs/kernel threads used")
-        flag.BoolVar(&ka, "keep-alive", true, "Use HTTP keep-alive")
-        flag.BoolVar(&ka, "compress", true, "Use HTTP compression")
-        flag.StringVar(&url, "url", "http://127.0.0.1/", "URL")
-        flag.StringVar(&method, "method", "GET", "HTTP method (GET, POST, PUT, DELETE...)")
-        flag.StringVar(&body, "body", "", "Request body")
-        flag.StringVar(&user, "user", "", "HTTP authentication user name")
-        flag.StringVar(&pass, "pass", "", "HTTP authentication password")
-        flag.StringVar(&profile, "profile", "", "Profile file name (pprof format)")
+	flag.IntVar(&conc, "concurrency", 100, "Number of concurrent connections")
+	flag.IntVar(&reqs, "requests", 10000, "Total number of requests")
+	flag.IntVar(&cpus, "cpus", 2, "Number of CPUs/kernel threads used")
+	flag.BoolVar(&ka, "keep-alive", true, "Use HTTP keep-alive")
+	flag.BoolVar(&comp, "compress", true, "Use HTTP compression")
+	flag.StringVar(&url, "url", "http://127.0.0.1/", "URL")
+	flag.StringVar(&method, "method", "GET", "HTTP method (GET, POST, PUT, DELETE...)")
+	flag.StringVar(&body, "body", "", "Request body")
+	flag.StringVar(&user, "user", "", "HTTP authentication user name")
+	flag.StringVar(&pass, "pass", "", "HTTP authentication password")
+	flag.StringVar(&cpuprof, "cpu-prof", "", "CPU profile file name (pprof format)")
+	//flag.StringVar(&memprof, "mem-prof", "", "Memory allocation profile file name (pprof format)")
 	flag.Var(&hdr, "header", "Additional request header (can be set multiple time)")
-        flag.Parse()
+	flag.Parse()
 
 	// Use cpus kernel threads
 	runtime.GOMAXPROCS(cpus)
 
 	// Create HTTP client according to configuration
 	var transport = &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		DisableKeepAlives: !ka,
-		DisableCompression: !comp,
-		MaxIdleConnsPerHost: 10000,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		DisableKeepAlives:   !ka,
+		DisableCompression:  !comp,
+		MaxIdleConnsPerHost: conc,
 	}
 	var client = &http.Client{
 		Transport: transport,
 	}
 
 	// Profiling
-	if profile != "" {
-		f, err := os.Create(profile)
+	if cpuprof != "" {
+		f, err := os.Create(cpuprof)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -139,7 +155,7 @@ func main() {
 
 	// Wait for worker goroutines to get ready
 	for i := 0; i < conc; i++ {
-		<- ready_ch
+		<-ready_ch
 	}
 
 	begin := time.Now()
@@ -150,11 +166,22 @@ func main() {
 	}
 	// Wait for jobs to complete
 	for i := 0; i < conc; i++ {
-		<- done_ch
+		<-done_ch
 	}
 
 	end := time.Now()
 	elapsed := float32(end.Sub(begin))
 	throughput := float32(reqs) * 1000000000 / elapsed
-	fmt.Printf("%d requests sent in %.2f seconds - average throughput %.2f tps\n", reqs, elapsed / 1000000000, throughput)
+	fmt.Printf("%d requests sent in %.2f seconds - average throughput %.2f tps\n", reqs, elapsed/1000000000, throughput)
+
+	// Profiling
+	//if memprof != "" {
+	//f, err := os.Create(memprof)
+	//if err != nil {
+	//log.Fatal(err)
+	//}
+	//pprof.Lookup("heap").WriteTo(f, 0)
+	//f.Close()
+	//return
+	//}
 }
