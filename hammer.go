@@ -1,16 +1,18 @@
 package main
 
-import "crypto/tls"
-import "flag"
-import "fmt"
-import "io"
-import "log"
-import "net/http"
-import "runtime"
-import "runtime/pprof"
-import "os"
-import "strings"
-import "time"
+import (
+	"crypto/tls"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"runtime"
+	"runtime/pprof"
+	"strings"
+	"time"
+)
 
 // header field type
 type hfield struct {
@@ -103,22 +105,22 @@ func main() {
 	// Command line parameters
 	var conc, reqs, cpus int
 	var ka, comp bool
-	var method, url, body, user, pass, cpuprof/*, memprof*/ string
+	var method, url, body, user, pass, cpuprof /*, memprof*/ string
 	var hdr header
 
-	flag.IntVar(&conc, "concurrency", 100, "Number of concurrent connections")
-	flag.IntVar(&reqs, "requests", 10000, "Total number of requests")
-	flag.IntVar(&cpus, "cpus", 2, "Number of CPUs/kernel threads used")
-	flag.BoolVar(&ka, "keep-alive", true, "Use HTTP keep-alive")
-	flag.BoolVar(&comp, "compress", true, "Use HTTP compression")
-	flag.StringVar(&url, "url", "http://127.0.0.1/", "URL")
-	flag.StringVar(&method, "method", "GET", "HTTP method (GET, POST, PUT, DELETE...)")
 	flag.StringVar(&body, "body", "", "Request body")
-	flag.StringVar(&user, "user", "", "HTTP authentication user name")
-	flag.StringVar(&pass, "pass", "", "HTTP authentication password")
+	flag.IntVar(&conc, "concurrency", 100, "Number of concurrent connections")
+	flag.IntVar(&cpus, "cpus", 2, "Number of CPUs/kernel threads used")
 	flag.StringVar(&cpuprof, "cpu-prof", "", "CPU profile file name (pprof format)")
-	//flag.StringVar(&memprof, "mem-prof", "", "Memory allocation profile file name (pprof format)")
+	flag.BoolVar(&comp, "compress", false, "Use HTTP compression")
 	flag.Var(&hdr, "header", "Additional request header (can be set multiple time)")
+	flag.BoolVar(&ka, "keep-alive", true, "Use HTTP keep-alive")
+	flag.StringVar(&pass, "pass", "", "HTTP authentication password")
+	//flag.StringVar(&memprof, "mem-prof", "", "Memory allocation profile file name (pprof format)")
+	flag.StringVar(&method, "method", "GET", "HTTP method (GET, POST, PUT, DELETE...)")
+	flag.IntVar(&reqs, "requests", 10000, "Total number of requests")
+	flag.StringVar(&url, "url", "http://127.0.0.1/", "URL")
+	flag.StringVar(&user, "user", "", "HTTP authentication user name")
 	flag.Parse()
 
 	// Use cpus kernel threads
@@ -126,7 +128,7 @@ func main() {
 
 	// Create HTTP client according to configuration
 	var transport = &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_CBC_SHA}},
 		DisableKeepAlives:   !ka,
 		DisableCompression:  !comp,
 		MaxIdleConnsPerHost: conc,
