@@ -2,11 +2,12 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
 	"fmt"
-	"io"
+	"github.com/valyala/fasthttp"
 	"log"
-	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -49,22 +50,10 @@ var ready_ch = make(chan bool)
 var start_ch = make(chan bool)
 var done_ch = make(chan bool)
 
-func send_requests(client *http.Client, iter int, method string, url string, body string, hdr header, user string, pass string) {
-	var body_reader io.ReadSeeker
-	if 0 < len(body) {
-		body_reader = strings.NewReader(body)
-	}
-	req, err := http.NewRequest(method, url, body_reader)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	for _, hf := range hdr {
-		req.Header.Add(hf.name, hf.value)
-	}
-	if user != "" {
-		req.SetBasicAuth(user, pass)
-	}
+func sendRequests(client *fasthttp.HostClient, iter int, template *fasthttp.Request) {
+	var resp fasthttp.Response
+	var req fasthttp.Request 
+	template.CopyTo(&req)
 
 	// Tell main thread we are ready
 	ready_ch <- true
@@ -72,40 +61,27 @@ func send_requests(client *http.Client, iter int, method string, url string, bod
 	// Wait for main thread to start the injection
 	<-start_ch
 
-	var buf = make([]byte, 4096)
 	// Perform injection
 	for i := 0; i < iter; i++ {
-		if body_reader != nil {
-			_, err = body_reader.Seek(0, 0)
-			if err != nil {
-				log.Println(err)
-				break
-			}
-		}
-		resp, err := client.Do(req)
+		err := client.Do(&req, &resp)
 		if err != nil {
 			log.Println(err)
 			break
 		}
-		for {
-			_, err = resp.Body.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					log.Println(err)
-				}
-				break
-			}
-		}
-		resp.Body.Close()
 	}
 	done_ch <- true
+}
+
+func basicAuth(username, password string) string {
+	auth := username + ":" + password
+	return base64.StdEncoding.EncodeToString([]byte(auth))
 }
 
 func main() {
 	// Command line parameters
 	var conc, reqs, cpus int
 	var ka, comp bool
-	var method, url, body, user, pass, cpuprof /*, memprof*/ string
+	var method, uri, body, user, pass, cpuprof /*, memprof*/ string
 	var hdr header
 
 	flag.StringVar(&body, "body", "", "Request body")
@@ -119,22 +95,58 @@ func main() {
 	//flag.StringVar(&memprof, "mem-prof", "", "Memory allocation profile file name (pprof format)")
 	flag.StringVar(&method, "method", "GET", "HTTP method (GET, POST, PUT, DELETE...)")
 	flag.IntVar(&reqs, "requests", 10000, "Total number of requests")
-	flag.StringVar(&url, "url", "http://127.0.0.1/", "URL")
+	flag.StringVar(&uri, "url", "http://127.0.0.1/", "URL")
 	flag.StringVar(&user, "user", "", "HTTP authentication user name")
 	flag.Parse()
 
 	// Use cpus kernel threads
 	runtime.GOMAXPROCS(cpus)
 
-	// Create HTTP client according to configuration
-	var transport = &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_CBC_SHA}},
-		DisableKeepAlives:   !ka,
-		DisableCompression:  !comp,
-		MaxIdleConnsPerHost: conc,
+	// Parse URL
+	parsed_uri, err := url.Parse(uri)
+	if err != nil {
+		log.Println(err)
+		return
 	}
-	var client = &http.Client{
-		Transport: transport,
+	if parsed_uri.Scheme != "http" && parsed_uri.Scheme != "https" {
+		log.Println("Unknown URI scheme: " + parsed_uri.Scheme)
+		return
+	}
+
+	// Create HTTP client according to configuration
+	client := &fasthttp.HostClient{
+		Addr: parsed_uri.Host,
+		MaxConns: conc,
+		IsTLS: (parsed_uri.Scheme == "https"),
+		TLSConfig: &tls.Config{InsecureSkipVerify: true, CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_CBC_SHA}},
+	}
+
+	// Build request template
+	var req fasthttp.Request 
+	req.Header.SetMethod(method)
+	req.SetRequestURI(uri)
+	req.SetBody([]byte(body))
+	for _, hf := range hdr {
+		req.Header.Add(hf.name, hf.value)
+	}
+	if user != "" {
+		req.Header.Set("Authorization", "Basic " + basicAuth(user, pass))
+	}
+	if comp {
+		req.Header.Set("Accept-Encoding", "gzip, deflate")
+	}
+
+	// Create goroutines
+	remaining := reqs
+	for i := 0; i < conc; i++ {
+		n := remaining / (conc - i)
+		go sendRequests(client, n, &req)
+		remaining -= n
+	}
+
+	// Wait for worker goroutines to get ready
+	for i := 0; i < conc; i++ {
+		<-ready_ch
 	}
 
 	// Profiling
@@ -145,19 +157,6 @@ func main() {
 		}
 		pprof.StartCPUProfile(f)
 		defer pprof.StopCPUProfile()
-	}
-
-	// Create goroutines
-	remaining := reqs
-	for i := 0; i < conc; i++ {
-		n := remaining / (conc - i)
-		go send_requests(client, n, method, url, body, hdr, user, pass)
-		remaining -= n
-	}
-
-	// Wait for worker goroutines to get ready
-	for i := 0; i < conc; i++ {
-		<-ready_ch
 	}
 
 	begin := time.Now()
